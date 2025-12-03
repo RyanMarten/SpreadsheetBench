@@ -8,6 +8,8 @@ SpreadsheetBench is a challenging spreadsheet manipulation benchmark that (1) co
 
 ## News
 
+[2025/12] We are releasing [**SpreadsheetBench Verified**](https://huggingface.co/datasets/KAKA22/SpreadsheetBench/blob/main/spreadsheetbench_verified_400.tar.gz), an expert annotated subset of 400 instances. This benchmark was developed in collaboration with [Shortcut.AI](https://shortcut.ai/) (Fundamental Research Labs).
+
 [2025/04] We open-source the [complete benchmark](https://github.com/RUCKBReasoning/SpreadsheetBench/blob/main/data/all_data_912.tar.gz), including all 912 questions and related spreadsheet files.
 
 [2024/09] 🔥 SpreadsheetBench has been accepted at NeurIPS D&B Track 2024 as a spotlight.
