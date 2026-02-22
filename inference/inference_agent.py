@@ -126,8 +126,8 @@ def run_agent_on_task(data, dataset_path, output_dir, opt):
                 text=True,
                 timeout=opt.timeout,
                 env={
-                    **os.environ,
-                    "ANTHROPIC_API_KEY": os.environ["ANTHROPIC_API_KEY"],
+                    k: v for k, v in os.environ.items()
+                    if k not in ("CLAUDECODE", "CLAUDE_CODE")
                 },
             )
 
