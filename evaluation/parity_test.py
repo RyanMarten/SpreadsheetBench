@@ -23,15 +23,61 @@ from collections import defaultdict
 DEFAULT_DATASET = "../data/sample_data_200"
 
 # Override via env var or command line
-import sys as _sys
-_dataset_arg = None
-for i, arg in enumerate(_sys.argv):
-    if arg == "--dataset" and i + 1 < len(_sys.argv):
-        _dataset_arg = _sys.argv[i + 1]
-DATASET_DIR = os.path.abspath(_dataset_arg or os.environ.get("DATASET_DIR", DEFAULT_DATASET))
+import argparse as _argparse
+_parser = _argparse.ArgumentParser(add_help=False)
+_parser.add_argument("--dataset", default=None)
+_parser.add_argument("--num-test-cases", type=int, default=None,
+                     help="Number of test cases per task (default: auto-detect)")
+_args, _ = _parser.parse_known_args()
+
+DATASET_DIR = os.path.abspath(_args.dataset or os.environ.get("DATASET_DIR", DEFAULT_DATASET))
 SPREADSHEET_DIR = os.path.join(DATASET_DIR, "spreadsheet")
 RECALC_DIR = os.path.abspath(DATASET_DIR + "_recalculated")
 SOFFICE = "/Applications/LibreOffice.app/Contents/MacOS/soffice"
+
+# Irregular tasks in verified_400
+BARE_NAMING_TASKS = {"13284", "32023", "32789", "56274", "58109"}
+MISMATCHED_ID_TASKS = {"42930": "43930"}
+
+
+def detect_dataset_mode(spreadsheet_dir, dataset):
+    """Auto-detect naming convention: 'sample' (_answer/_input, 3 tc) or 'verified' (_golden/_init, 1 tc)."""
+    task_id = str(dataset[0]['id'])
+    task_dir = os.path.join(spreadsheet_dir, task_id)
+    if os.path.exists(os.path.join(task_dir, f"1_{task_id}_answer.xlsx")):
+        return "sample", 3
+    if os.path.exists(os.path.join(task_dir, f"1_{task_id}_golden.xlsx")):
+        return "verified", 1
+    # Check bare naming
+    if os.path.exists(os.path.join(task_dir, "golden.xlsx")):
+        return "verified", 1
+    # Default
+    return "sample", 3
+
+
+def get_file_paths(task_id, tc, spreadsheet_dir, mode):
+    """Get (gt_path, proc_path) for a given task and test case, handling naming quirks."""
+    task_id_str = str(task_id)
+    task_dir = os.path.join(spreadsheet_dir, task_id_str)
+
+    if mode == "verified":
+        # Handle bare naming tasks (no numeric prefix, different names)
+        if task_id_str in BARE_NAMING_TASKS:
+            gt_path = os.path.join(task_dir, "golden.xlsx")
+            proc_path = os.path.join(task_dir, "initial.xlsx")
+        # Handle mismatched ID task
+        elif task_id_str in MISMATCHED_ID_TASKS:
+            file_id = MISMATCHED_ID_TASKS[task_id_str]
+            gt_path = os.path.join(task_dir, f"{tc}_{file_id}_golden.xlsx")
+            proc_path = os.path.join(task_dir, f"{tc}_{task_id_str}_init.xlsx")
+        else:
+            gt_path = os.path.join(task_dir, f"{tc}_{task_id_str}_golden.xlsx")
+            proc_path = os.path.join(task_dir, f"{tc}_{task_id_str}_init.xlsx")
+    else:
+        gt_path = os.path.join(task_dir, f"{tc}_{task_id_str}_answer.xlsx")
+        proc_path = os.path.join(task_dir, f"{tc}_{task_id_str}_input.xlsx")
+
+    return gt_path, proc_path
 
 
 # --- Evaluation logic (copied from evaluation.py to keep self-contained) ---
@@ -205,17 +251,15 @@ def recalculate_file(filepath):
         return True
 
 
-def run_evaluation(dataset, spreadsheet_dir):
+def run_evaluation(dataset, spreadsheet_dir, num_test_cases, mode):
     """Run evaluation and return per-task results."""
     results = {}
     for data in dataset:
         task_id = data['id']
         test_case_results = []
-        for tc in range(3):
-            gt_path = os.path.join(spreadsheet_dir, str(task_id),
-                                   f"{tc + 1}_{task_id}_answer.xlsx")
-            proc_path = os.path.join(spreadsheet_dir, str(task_id),
-                                     f"{tc + 1}_{task_id}_input.xlsx")
+        for tc_idx in range(num_test_cases):
+            tc = tc_idx + 1
+            gt_path, proc_path = get_file_paths(task_id, tc, spreadsheet_dir, mode)
             try:
                 result, msg = compare_workbooks(gt_path, proc_path, data['answer_position'])
             except Exception:
@@ -233,7 +277,13 @@ def run_evaluation(dataset, spreadsheet_dir):
 def main():
     with open(os.path.join(DATASET_DIR, "dataset.json")) as f:
         dataset = json.load(f)
-    print(f"Loaded {len(dataset)} tasks from dataset.json\n")
+    print(f"Loaded {len(dataset)} tasks from dataset.json")
+    print(f"Dataset: {DATASET_DIR}\n")
+
+    # Auto-detect or use override
+    mode, auto_tc = detect_dataset_mode(SPREADSHEET_DIR, dataset)
+    num_test_cases = _args.num_test_cases if _args.num_test_cases else auto_tc
+    print(f"Mode: {mode} | Test cases per task: {num_test_cases}\n")
 
     # ---- Phase 1: Analyze formula status in answer files ----
     print("=" * 60)
@@ -247,9 +297,9 @@ def main():
 
     for data in tqdm(dataset, desc="Scanning formulas"):
         task_id = data['id']
-        for tc in range(3):
-            answer_path = os.path.join(SPREADSHEET_DIR, str(task_id),
-                                        f"{tc + 1}_{task_id}_answer.xlsx")
+        for tc_idx in range(num_test_cases):
+            tc = tc_idx + 1
+            answer_path, _ = get_file_paths(task_id, tc, SPREADSHEET_DIR, mode)
             if os.path.exists(answer_path):
                 formulas, cached, uncached = check_formulas_in_file(answer_path)
                 if formulas > 0:
@@ -270,7 +320,7 @@ def main():
     print("PHASE 2: Evaluation BEFORE recalculation (original files)")
     print("=" * 60)
 
-    results_before = run_evaluation(dataset, SPREADSHEET_DIR)
+    results_before = run_evaluation(dataset, SPREADSHEET_DIR, num_test_cases, mode)
     before_hard = sum(r['hard'] for r in results_before.values())
     before_soft = sum(r['soft'] for r in results_before.values())
     print(f"  Hard accuracy: {before_hard}/{len(results_before)} ({100*before_hard/len(results_before):.1f}%)")
@@ -312,7 +362,7 @@ def main():
     print("PHASE 4: Evaluation AFTER recalculation (LibreOffice)")
     print("=" * 60)
 
-    results_after = run_evaluation(dataset, recalc_spreadsheet_dir)
+    results_after = run_evaluation(dataset, recalc_spreadsheet_dir, num_test_cases, mode)
     after_hard = sum(r['hard'] for r in results_after.values())
     after_soft = sum(r['soft'] for r in results_after.values())
     print(f"  Hard accuracy: {after_hard}/{len(results_after)} ({100*after_hard/len(results_after):.1f}%)")
