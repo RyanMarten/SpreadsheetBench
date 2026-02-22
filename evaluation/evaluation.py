@@ -9,6 +9,13 @@ from collections import defaultdict
 from openpyxl.styles import PatternFill, Font
 
 
+# Tasks in verified_400 with bare naming (golden.xlsx, no ID prefix)
+BARE_NAMING_IDS = {"13284", "32023", "32789", "56274", "58109"}
+
+# Tasks in verified_400 with mismatched IDs in golden filenames
+MISMATCHED_IDS = {"42930": "43930"}
+
+
 def datetime_to_float(dt):
     excel_start_date = datetime.datetime(1899, 12, 30)
     delta = dt - excel_start_date
@@ -99,7 +106,7 @@ def parse_cell_range(range_str):
             start_row += char
         else:
             start_col += char
-    
+
     end_col, end_row = '', ''
     for char in end_cell:
         if char.isdigit():
@@ -136,7 +143,7 @@ def cell_level_compare(wb_gt, wb_proc, sheet_name, cell_range):
             msg = f"Value difference at cell {cell_gt.coordinate}: ws_gt has {cell_gt.value},\
                     ws_proc has {cell_proc.value}"
             return False, msg
-        
+
         # if not compare_fill_color(cell_gt.fill, cell_proc.fill):
         #     msg = f"Fill color difference at cell {cell_gt.coordinate}: ws_gt has {cell_gt.fill.fgColor.rgb},\
         #             ws_proc has {cell_proc.fill.fgColor.rgb}"
@@ -176,7 +183,7 @@ def compare_workbooks(gt_file, proc_file, instruction_type, answer_position):
         else:
             sheet_name = wb_gt.sheetnames[0]
             cell_range = sheet_cell_range
-    
+
         # process sheet_name and cell_range
         sheet_name = sheet_name.lstrip("'").rstrip("'")
         cell_range = cell_range.lstrip("'").rstrip("'")
@@ -188,13 +195,32 @@ def compare_workbooks(gt_file, proc_file, instruction_type, answer_position):
     return all(result_list), ""
 
 
+def get_answer_filename(task_id, test_case_idx, dataset):
+    """Get the ground truth answer filename, handling naming variations."""
+    if dataset.startswith("spreadsheetbench_verified_400"):
+        if str(task_id) in BARE_NAMING_IDS:
+            return "golden.xlsx"
+        golden_id = MISMATCHED_IDS.get(str(task_id), str(task_id))
+        return f"{test_case_idx}_{golden_id}_golden.xlsx"
+    return f"{test_case_idx}_{task_id}_answer.xlsx"
+
+
+def get_output_filename(task_id, test_case_idx, dataset):
+    """Get the LLM output filename to evaluate."""
+    # For verified_400 with bare naming, we still use the consistent output naming
+    # since inference_single.py always produces 1_{task_id}_output.xlsx
+    return f"{test_case_idx}_{task_id}_output.xlsx"
+
+
 def parse_option():
     parser = argparse.ArgumentParser("command line arguments for evaluation.")
-    
+
     parser.add_argument('--model', type=str, default='llama', help='model name')
     parser.add_argument('--setting', type=str, default='single',
         help='four setting: single, multi_react_exec, multi_row_exec, multi_row_react_exec')
     parser.add_argument('--dataset', type=str, default="all_data_912", help='dataset name')
+    parser.add_argument('--num-test-cases', type=int, default=3,
+        help='number of test cases per task (3 for sample_data_200, 1 for verified_400)')
 
     opt = parser.parse_args()
 
@@ -209,10 +235,10 @@ def evaluation(opt):
     eval_results = []
     for data in tqdm(dataset):
         test_case_results = []
-        for test_case_idx in range(3):
-            gt_path = f"{dataset_path}/spreadsheet/{data['id']}/{test_case_idx + 1}_{data['id']}_answer.xlsx"
-            proc_path = f"{dataset_path}/spreadsheet/{data['id']}/{test_case_idx + 1}_{data['id']}_input.xlsx"
-            # proc_path = f"{dataset_path}/outputs/{opt.setting}_{opt.model}/{test_case_idx + 1}_{data['id']}_output.xlsx"
+        for test_case_idx in range(1, opt.num_test_cases + 1):
+            gt_name = get_answer_filename(data['id'], test_case_idx, opt.dataset)
+            gt_path = f"{dataset_path}/spreadsheet/{data['id']}/{gt_name}"
+            proc_path = f"{dataset_path}/outputs/{opt.setting}_{opt.model}/{test_case_idx}_{data['id']}_output.xlsx"
             try:
                 result, _ = compare_workbooks(gt_path, proc_path, data['instruction_type'], data['answer_position'])
             except:
@@ -227,7 +253,16 @@ def evaluation(opt):
             'soft_restriction': soft_restriction,
             'hard_restriction': hard_restriction,
         })
-    
+
+    # Print summary
+    soft_scores = [r['soft_restriction'] for r in eval_results]
+    hard_scores = [r['hard_restriction'] for r in eval_results]
+    print(f"\nResults Summary:")
+    print(f"  Soft restriction (avg): {np.mean(soft_scores) * 100:.2f}%")
+    print(f"  Hard restriction (avg): {np.mean(hard_scores) * 100:.2f}%")
+    print(f"  Total tasks: {len(eval_results)}")
+
+    os.makedirs('../outputs', exist_ok=True)
     with open(f'../outputs/eval_{opt.setting}_{opt.model}.json', 'w') as fp:
         json.dump(eval_results, fp, indent=4)
 

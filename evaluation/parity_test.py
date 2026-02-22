@@ -20,9 +20,17 @@ import openpyxl
 from tqdm import tqdm
 from collections import defaultdict
 
-DATASET_DIR = os.path.abspath("../data/sample_data_200")
+DEFAULT_DATASET = "../data/sample_data_200"
+
+# Override via env var or command line
+import sys as _sys
+_dataset_arg = None
+for i, arg in enumerate(_sys.argv):
+    if arg == "--dataset" and i + 1 < len(_sys.argv):
+        _dataset_arg = _sys.argv[i + 1]
+DATASET_DIR = os.path.abspath(_dataset_arg or os.environ.get("DATASET_DIR", DEFAULT_DATASET))
 SPREADSHEET_DIR = os.path.join(DATASET_DIR, "spreadsheet")
-RECALC_DIR = os.path.abspath("../data/sample_data_200_recalculated")
+RECALC_DIR = os.path.abspath(DATASET_DIR + "_recalculated")
 SOFFICE = "/Applications/LibreOffice.app/Contents/MacOS/soffice"
 
 
