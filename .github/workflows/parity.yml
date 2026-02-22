@@ -87,6 +87,10 @@ jobs:
         run: |
           cd inference
           mkdir -p outputs log
+          LIMIT_ARG=""
+          if [ "${{ inputs.limit }}" != "0" ]; then
+            LIMIT_ARG="--limit ${{ inputs.limit }}"
+          fi
           python inference_single.py \
             --model claude-haiku-4-5-20251001 \
             --api_key "$ANTHROPIC_API_KEY" \
@@ -94,7 +98,8 @@ jobs:
             --dataset "${{ inputs.dataset }}" \
             --num-test-cases 1 \
             --conv_id "trial${{ matrix.trial }}" \
-            --code_exec_url "http://localhost:8081/execute"
+            --code_exec_url "http://localhost:8081/execute" \
+            $LIMIT_ARG
 
       - name: Stop API server
         if: always()
