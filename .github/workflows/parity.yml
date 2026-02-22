@@ -4,30 +4,37 @@ on:
   workflow_dispatch:
     inputs:
       num_trials:
-        description: 'Number of inference trials'
+        description: 'Number of inference trials (1, 2, or 3)'
         required: false
         default: '3'
-        type: string
+        type: choice
+        options: ['1', '2', '3']
       dataset:
         description: 'Dataset to use'
         required: false
         default: 'spreadsheetbench_verified_400'
         type: string
       limit:
-        description: 'Limit number of tasks (0 = all)'
+        description: 'Limit number of tasks (0 = all 400)'
         required: false
         default: '0'
         type: string
 
 jobs:
   inference:
-    name: LLM Inference (Haiku 4.5)
+    name: "Inference (Trial ${{ matrix.trial }})"
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     strategy:
+      fail-fast: false
       matrix:
-        trial: ${{ fromJSON(format('[{0}]', join(fromJSON(format('["{0}"]', inputs.num_trials == '1' && '1' || inputs.num_trials == '2' && '1","2' || '1","2","3')), ','))) }}
+        trial: [1, 2, 3]
+    # Skip trials beyond num_trials
+    if: ${{ matrix.trial <= fromJSON(inputs.num_trials || '3') }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: parity-haiku
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -36,59 +43,54 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -r requirements.txt
+          pip install tqdm pandas openpyxl openai numpy tornado docker requests
 
       - name: Extract dataset
         run: |
           cd data
-          if [ ! -d "${{ inputs.dataset }}" ]; then
-            tar xzf "${{ inputs.dataset }}.tar.gz"
-          fi
+          tar xzf "${{ inputs.dataset }}.tar.gz"
 
-      - name: Build code execution Docker image
+      - name: Pull executor Docker image
+        run: docker pull xingyaoww/codeact-executor
+
+      - name: Update config and start API server
         run: |
           cd code_exec_docker
-          docker build -f Dockerfile.executor -t ssb-executor .
-
-      - name: Start Jupyter kernel
-        run: |
-          cd code_exec_docker
-          # Update config to point to the right dataset
-          python -c "
+          # Point config at the dataset (absolute path for Docker volume mount)
+          python3 -c "
           import json
-          config = json.load(open('config.json'))
-          config['DATA_DIR'] = '../data/${{ inputs.dataset }}'
+          config = {'volumes_path': '$(pwd)/../data/${{ inputs.dataset }}'}
           json.dump(config, open('config.json', 'w'))
           "
-          bash start_jupyter_server.sh 8888 &
-          sleep 10
-
-      - name: Start API server
-        run: |
-          cd code_exec_docker
-          docker build -f Dockerfile.api -t ssb-api .
-          docker run -d -p 8081:8081 \
-            -v "$(pwd)/../data:/mnt/data" \
-            -e JUPYTER_URL=http://host.docker.internal:8888 \
-            ssb-api
+          # Start the API server in the background
+          python3 api.py --port 8081 &
+          echo $! > /tmp/api_pid.txt
           sleep 5
+          echo "API server started (PID: $(cat /tmp/api_pid.txt))"
 
       - name: Run inference (Trial ${{ matrix.trial }})
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           cd inference
-          LIMIT_ARG=""
-          if [ "${{ inputs.limit }}" != "0" ]; then
-            LIMIT_ARG="--limit ${{ inputs.limit }}"
-          fi
+          mkdir -p outputs log
           python inference_single.py \
             --model claude-haiku-4-5-20251001 \
             --api_key "$ANTHROPIC_API_KEY" \
             --base_url "https://api.anthropic.com/v1/" \
             --dataset "${{ inputs.dataset }}" \
             --num-test-cases 1 \
-            --conv_id "trial${{ matrix.trial }}"
+            --conv_id "trial${{ matrix.trial }}" \
+            --code_exec_url "http://localhost:8081/execute"
+
+      - name: Stop API server
+        if: always()
+        run: |
+          if [ -f /tmp/api_pid.txt ]; then
+            kill $(cat /tmp/api_pid.txt) 2>/dev/null || true
+          fi
+          # Stop any remaining Docker containers
+          docker ps -q | xargs -r docker stop 2>/dev/null || true
 
       - name: Upload inference outputs
         uses: actions/upload-artifact@v4
@@ -96,24 +98,29 @@ jobs:
           name: inference-outputs-trial${{ matrix.trial }}
           path: |
             data/${{ inputs.dataset }}/outputs/single_claude-haiku-4-5-20251001/
-            inference/outputs/conv_single_claude-haiku-4-5-20251001.jsonl
+          retention-days: 30
 
-      - name: Upload dataset JSON
-        if: matrix.trial == '1'
+      - name: Upload conversation logs
         uses: actions/upload-artifact@v4
         with:
-          name: dataset-json
-          path: data/${{ inputs.dataset }}/dataset.json
+          name: inference-conv-trial${{ matrix.trial }}
+          path: inference/outputs/
+          retention-days: 30
 
   eval-libreoffice:
-    name: LibreOffice Evaluation (Exp 2)
+    name: "LibreOffice Eval (Trial ${{ matrix.trial }})"
     needs: inference
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     strategy:
+      fail-fast: false
       matrix:
-        trial: ${{ fromJSON(format('[{0}]', join(fromJSON(format('["{0}"]', inputs.num_trials == '1' && '1' || inputs.num_trials == '2' && '1","2' || '1","2","3')), ','))) }}
+        trial: [1, 2, 3]
+    if: ${{ matrix.trial <= fromJSON(inputs.num_trials || '3') }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: parity-haiku
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -122,81 +129,9 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -r requirements.txt
+          pip install tqdm pandas openpyxl numpy
           sudo apt-get update
-          sudo apt-get install -y libreoffice-calc
-
-      - name: Extract dataset
-        run: |
-          cd data
-          if [ ! -d "${{ inputs.dataset }}" ]; then
-            tar xzf "${{ inputs.dataset }}.tar.gz"
-          fi
-
-      - name: Download inference outputs
-        uses: actions/download-artifact@v4
-        with:
-          name: inference-outputs-trial${{ matrix.trial }}
-          path: data/${{ inputs.dataset }}/outputs/single_claude-haiku-4-5-20251001/
-
-      - name: Recalculate formulas (LibreOffice)
-        run: |
-          bash evaluation/recalculate_libreoffice.sh \
-            "data/${{ inputs.dataset }}/outputs/single_claude-haiku-4-5-20251001/"
-
-      - name: Recalculate answer file formulas (LibreOffice)
-        run: |
-          # Recalculate answer/golden files too
-          bash evaluation/recalculate_libreoffice.sh \
-            "data/${{ inputs.dataset }}/spreadsheet/" --recursive
-
-      - name: Run evaluation
-        run: |
-          cd evaluation
-          python evaluation.py \
-            --model claude-haiku-4-5-20251001 \
-            --setting single \
-            --dataset "${{ inputs.dataset }}" \
-            --num-test-cases 1
-
-      - name: Upload evaluation results
-        uses: actions/upload-artifact@v4
-        with:
-          name: eval-libreoffice-trial${{ matrix.trial }}
-          path: outputs/eval_single_claude-haiku-4-5-20251001.json
-
-      - name: Print summary
-        run: |
-          python -c "
-          import json
-          results = json.load(open('outputs/eval_single_claude-haiku-4-5-20251001.json'))
-          soft = [r['soft_restriction'] for r in results]
-          hard = [r['hard_restriction'] for r in results]
-          print(f'Trial ${{ matrix.trial }} (LibreOffice):')
-          print(f'  Soft pass rate: {sum(soft)/len(soft)*100:.2f}%')
-          print(f'  Hard pass rate: {sum(hard)/len(hard)*100:.2f}%')
-          print(f'  Total tasks: {len(results)}')
-          "
-
-  eval-win32com:
-    name: Win32com Evaluation (Exp 1)
-    needs: inference
-    runs-on: windows-latest
-    strategy:
-      matrix:
-        trial: ${{ fromJSON(format('[{0}]', join(fromJSON(format('["{0}"]', inputs.num_trials == '1' && '1' || inputs.num_trials == '2' && '1","2' || '1","2","3')), ','))) }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
-          pip install pywin32
+          sudo apt-get install -y --no-install-recommends libreoffice-calc
 
       - name: Extract dataset
         run: |
@@ -209,20 +144,15 @@ jobs:
           name: inference-outputs-trial${{ matrix.trial }}
           path: data/${{ inputs.dataset }}/outputs/single_claude-haiku-4-5-20251001/
 
-      - name: Recalculate formulas (win32com + Excel)
+      - name: Recalculate output formulas (LibreOffice)
         run: |
-          python evaluation/open_spreadsheet.py \
-            --dir_path "data/${{ inputs.dataset }}/outputs/single_claude-haiku-4-5-20251001/" \
-            --backend win32com
+          bash evaluation/recalculate_libreoffice.sh \
+            "data/${{ inputs.dataset }}/outputs/single_claude-haiku-4-5-20251001/"
 
-      - name: Recalculate answer file formulas
+      - name: Recalculate answer formulas (LibreOffice)
         run: |
-          # Process each spreadsheet subdirectory
-          $dirs = Get-ChildItem -Path "data/${{ inputs.dataset }}/spreadsheet/" -Directory
-          foreach ($dir in $dirs) {
-            python evaluation/open_spreadsheet.py --dir_path $dir.FullName --backend win32com
-          }
-        shell: pwsh
+          bash evaluation/recalculate_libreoffice.sh \
+            "data/${{ inputs.dataset }}/spreadsheet/" --recursive
 
       - name: Run evaluation
         run: |
@@ -233,15 +163,92 @@ jobs:
             --dataset "${{ inputs.dataset }}" \
             --num-test-cases 1
 
+      - name: Print summary
+        run: |
+          python3 -c "
+          import json
+          results = json.load(open('outputs/eval_single_claude-haiku-4-5-20251001.json'))
+          soft = [r['soft_restriction'] for r in results]
+          hard = [r['hard_restriction'] for r in results]
+          print(f'Trial ${{ matrix.trial }} (LibreOffice):')
+          print(f'  Soft pass rate: {sum(soft)/len(soft)*100:.2f}%')
+          print(f'  Hard pass rate: {sum(hard)/len(hard)*100:.2f}%')
+          print(f'  Total tasks: {len(results)}')
+          "
+
       - name: Upload evaluation results
         uses: actions/upload-artifact@v4
         with:
-          name: eval-win32com-trial${{ matrix.trial }}
+          name: eval-libreoffice-trial${{ matrix.trial }}
           path: outputs/eval_single_claude-haiku-4-5-20251001.json
+          retention-days: 30
+
+  eval-win32com:
+    name: "Win32com Eval (Trial ${{ matrix.trial }})"
+    needs: inference
+    runs-on: windows-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        trial: [1, 2, 3]
+    if: ${{ matrix.trial <= fromJSON(inputs.num_trials || '3') }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: parity-haiku
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install tqdm pandas openpyxl numpy pywin32
+
+      - name: Extract dataset
+        run: |
+          cd data
+          tar xzf "${{ inputs.dataset }}.tar.gz"
+        shell: bash
+
+      - name: Download inference outputs
+        uses: actions/download-artifact@v4
+        with:
+          name: inference-outputs-trial${{ matrix.trial }}
+          path: data/${{ inputs.dataset }}/outputs/single_claude-haiku-4-5-20251001/
+
+      - name: Recalculate output formulas (win32com)
+        run: |
+          python evaluation/open_spreadsheet.py `
+            --dir_path "data/${{ inputs.dataset }}/outputs/single_claude-haiku-4-5-20251001/" `
+            --backend win32com
+        shell: pwsh
+        continue-on-error: true  # Excel may not be available on GH Actions
+
+      - name: Recalculate answer formulas (win32com)
+        run: |
+          $dirs = Get-ChildItem -Path "data/${{ inputs.dataset }}/spreadsheet/" -Directory
+          foreach ($dir in $dirs) {
+            python evaluation/open_spreadsheet.py --dir_path $dir.FullName --backend win32com
+          }
+        shell: pwsh
+        continue-on-error: true
+
+      - name: Run evaluation
+        run: |
+          cd evaluation
+          python evaluation.py `
+            --model claude-haiku-4-5-20251001 `
+            --setting single `
+            --dataset "${{ inputs.dataset }}" `
+            --num-test-cases 1
+        shell: pwsh
 
       - name: Print summary
         run: |
-          python -c "
+          python3 -c "
           import json
           results = json.load(open('outputs/eval_single_claude-haiku-4-5-20251001.json'))
           soft = [r['soft_restriction'] for r in results]
@@ -251,6 +258,14 @@ jobs:
           print(f'  Hard pass rate: {sum(hard)/len(hard)*100:.2f}%')
           print(f'  Total tasks: {len(results)}')
           "
+        shell: bash
+
+      - name: Upload evaluation results
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-win32com-trial${{ matrix.trial }}
+          path: outputs/eval_single_claude-haiku-4-5-20251001.json
+          retention-days: 30
 
   summary:
     name: Parity Summary
@@ -263,26 +278,32 @@ jobs:
         with:
           pattern: eval-*
           path: results/
+          merge-multiple: false
 
       - name: Generate parity report
         run: |
-          python3 -c "
+          python3 << 'PYEOF'
           import json, os, glob
 
-          print('=== Parity Experiment Results ===')
-          print()
+          print("=== Parity Experiment Results ===\n")
 
-          for backend in ['libreoffice', 'win32com']:
-            files = sorted(glob.glob(f'results/eval-{backend}-trial*/eval_single_*.json'))
-            if not files:
-              print(f'{backend}: No results found')
-              continue
-            print(f'{backend.upper()} Evaluation:')
-            for f in files:
-              trial = f.split('trial')[1].split('/')[0]
-              results = json.load(open(f))
-              soft = [r['soft_restriction'] for r in results]
-              hard = [r['hard_restriction'] for r in results]
-              print(f'  Trial {trial}: soft={sum(soft)/len(soft)*100:.2f}%, hard={sum(hard)/len(hard)*100:.2f}%, n={len(results)}')
-            print()
-          "
+          for backend in ["libreoffice", "win32com"]:
+              files = sorted(glob.glob(f"results/eval-{backend}-trial*/eval_single_*.json"))
+              if not files:
+                  print(f"{backend}: No results found")
+                  continue
+              print(f"{backend.upper()} Evaluation:")
+              scores = []
+              for f in files:
+                  trial = f.split("trial")[1].split("/")[0]
+                  results = json.load(open(f))
+                  soft = [r["soft_restriction"] for r in results]
+                  hard = [r["hard_restriction"] for r in results]
+                  pct = sum(soft) / len(soft) * 100
+                  scores.append(pct)
+                  print(f"  Trial {trial}: {pct:.2f}% (n={len(results)})")
+              if len(scores) > 1:
+                  import statistics
+                  print(f"  Mean: {statistics.mean(scores):.2f}% ± {statistics.stdev(scores):.2f}%")
+              print()
+          PYEOF
