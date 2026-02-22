@@ -1,8 +1,14 @@
-name: Parity Experiments (Exp 1 + 2)
+name: Parity Experiments (Exp 2 + 2b)
 
 on:
   workflow_dispatch:
     inputs:
+      experiment:
+        description: 'Which experiment to run'
+        required: true
+        default: 'exp2'
+        type: choice
+        options: ['exp2', 'exp2b']
       num_trials:
         description: 'Number of inference trials (1, 2, or 3)'
         required: false
@@ -38,8 +44,10 @@ jobs:
             echo 'trials=[1,2,3]' >> "$GITHUB_OUTPUT"
           fi
 
-  inference:
-    name: "Inference (Trial ${{ matrix.trial }})"
+  # ── Exp 2: LLM single-turn (inference_single.py) ──────────────────────
+  inference-exp2:
+    name: "Exp 2 Inference (Trial ${{ matrix.trial }})"
+    if: inputs.experiment == 'exp2'
     needs: setup
     runs-on: ubuntu-latest
     timeout-minutes: 120
@@ -110,20 +118,109 @@ jobs:
       - name: Upload inference outputs
         uses: actions/upload-artifact@v4
         with:
-          name: inference-outputs-trial${{ matrix.trial }}
+          name: exp2-outputs-trial${{ matrix.trial }}
           path: data/${{ inputs.dataset }}/outputs/single_claude-haiku-4-5-20251001/
           retention-days: 30
 
       - name: Upload conversation logs
         uses: actions/upload-artifact@v4
         with:
-          name: inference-conv-trial${{ matrix.trial }}
+          name: exp2-conv-trial${{ matrix.trial }}
           path: inference/outputs/
           retention-days: 30
 
+  # ── Exp 2b: LLM multi-turn ReAct (inference_multiple.py) ──────────────
+  inference-exp2b:
+    name: "Exp 2b Inference (Trial ${{ matrix.trial }})"
+    if: inputs.experiment == 'exp2b'
+    needs: setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        trial: ${{ fromJSON(needs.setup.outputs.trials) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: parity-haiku
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install tqdm pandas openpyxl openai numpy tornado docker requests
+
+      - name: Extract dataset
+        run: |
+          cd data
+          tar xzf "${{ inputs.dataset }}.tar.gz"
+
+      - name: Pull executor Docker image
+        run: docker pull xingyaoww/codeact-executor
+
+      - name: Update config and start API server
+        run: |
+          cd code_exec_docker
+          python3 -c "
+          import json, os
+          config = {'volumes_path': os.path.abspath('../data/${{ inputs.dataset }}')}
+          json.dump(config, open('config.json', 'w'))
+          "
+          python3 api.py --port 8081 &
+          echo $! > /tmp/api_pid.txt
+          sleep 5
+          echo "API server started (PID: $(cat /tmp/api_pid.txt))"
+
+      - name: Run inference (Trial ${{ matrix.trial }})
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          cd inference
+          mkdir -p outputs log
+          LIMIT_ARG=""
+          if [ "${{ inputs.limit }}" != "0" ]; then
+            LIMIT_ARG="--limit ${{ inputs.limit }}"
+          fi
+          python inference_multiple.py \
+            --model claude-haiku-4-5-20251001 \
+            --api_key "$ANTHROPIC_API_KEY" \
+            --base_url "https://api.anthropic.com/v1/" \
+            --setting react_exec \
+            --dataset "${{ inputs.dataset }}" \
+            --num-test-cases 1 \
+            --conv_id "trial${{ matrix.trial }}" \
+            --code_exec_url "http://localhost:8081/execute" \
+            --max_turn_num 5 \
+            $LIMIT_ARG
+
+      - name: Stop API server
+        if: always()
+        run: |
+          [ -f /tmp/api_pid.txt ] && kill $(cat /tmp/api_pid.txt) 2>/dev/null || true
+          docker ps -q | xargs -r docker stop 2>/dev/null || true
+
+      - name: Upload inference outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: exp2b-outputs-trial${{ matrix.trial }}
+          path: data/${{ inputs.dataset }}/outputs/multi_react_exec_claude-haiku-4-5-20251001/
+          retention-days: 30
+
+      - name: Upload conversation logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: exp2b-conv-trial${{ matrix.trial }}
+          path: inference/outputs/
+          retention-days: 30
+
+  # ── Eval: LibreOffice (shared by both experiments) ─────────────────────
   eval-libreoffice:
     name: "LibreOffice Eval (Trial ${{ matrix.trial }})"
-    needs: [setup, inference]
+    needs: [setup, inference-exp2, inference-exp2b]
+    if: always() && (needs.inference-exp2.result == 'success' || needs.inference-exp2b.result == 'success')
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
@@ -151,16 +248,29 @@ jobs:
           cd data
           tar xzf "${{ inputs.dataset }}.tar.gz"
 
+      - name: Set output paths
+        id: paths
+        run: |
+          if [ "${{ inputs.experiment }}" = "exp2b" ]; then
+            echo "output_dir=multi_react_exec_claude-haiku-4-5-20251001" >> "$GITHUB_OUTPUT"
+            echo "setting=multi_react_exec" >> "$GITHUB_OUTPUT"
+            echo "artifact_prefix=exp2b" >> "$GITHUB_OUTPUT"
+          else
+            echo "output_dir=single_claude-haiku-4-5-20251001" >> "$GITHUB_OUTPUT"
+            echo "setting=single" >> "$GITHUB_OUTPUT"
+            echo "artifact_prefix=exp2" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Download inference outputs
         uses: actions/download-artifact@v4
         with:
-          name: inference-outputs-trial${{ matrix.trial }}
-          path: data/${{ inputs.dataset }}/outputs/single_claude-haiku-4-5-20251001/
+          name: ${{ steps.paths.outputs.artifact_prefix }}-outputs-trial${{ matrix.trial }}
+          path: data/${{ inputs.dataset }}/outputs/${{ steps.paths.outputs.output_dir }}/
 
       - name: Recalculate output formulas (LibreOffice)
         run: |
           bash evaluation/recalculate_libreoffice.sh \
-            "data/${{ inputs.dataset }}/outputs/single_claude-haiku-4-5-20251001/"
+            "data/${{ inputs.dataset }}/outputs/${{ steps.paths.outputs.output_dir }}/"
 
       - name: Recalculate answer formulas (LibreOffice)
         run: |
@@ -172,7 +282,7 @@ jobs:
           cd evaluation
           python evaluation.py \
             --model claude-haiku-4-5-20251001 \
-            --setting single \
+            --setting "${{ steps.paths.outputs.setting }}" \
             --dataset "${{ inputs.dataset }}" \
             --num-test-cases 1
 
@@ -180,10 +290,10 @@ jobs:
         run: |
           python3 -c "
           import json
-          results = json.load(open('outputs/eval_single_claude-haiku-4-5-20251001.json'))
+          results = json.load(open('outputs/eval_${{ steps.paths.outputs.setting }}_claude-haiku-4-5-20251001.json'))
           soft = [r['soft_restriction'] for r in results]
           hard = [r['hard_restriction'] for r in results]
-          print(f'Trial ${{ matrix.trial }} (LibreOffice):')
+          print(f'Trial ${{ matrix.trial }} (LibreOffice, ${{ inputs.experiment }}):')
           print(f'  Soft pass rate: {sum(soft)/len(soft)*100:.2f}%')
           print(f'  Hard pass rate: {sum(hard)/len(hard)*100:.2f}%')
           print(f'  Total tasks: {len(results)}')
@@ -192,13 +302,15 @@ jobs:
       - name: Upload evaluation results
         uses: actions/upload-artifact@v4
         with:
-          name: eval-libreoffice-trial${{ matrix.trial }}
-          path: outputs/eval_single_claude-haiku-4-5-20251001.json
+          name: eval-libreoffice-${{ inputs.experiment }}-trial${{ matrix.trial }}
+          path: outputs/eval_${{ steps.paths.outputs.setting }}_claude-haiku-4-5-20251001.json
           retention-days: 30
 
+  # ── Eval: Win32com (shared by both experiments) ────────────────────────
   eval-win32com:
     name: "Win32com Eval (Trial ${{ matrix.trial }})"
-    needs: [setup, inference]
+    needs: [setup, inference-exp2, inference-exp2b]
+    if: always() && (needs.inference-exp2.result == 'success' || needs.inference-exp2b.result == 'success')
     runs-on: windows-latest
     timeout-minutes: 60
     strategy:
@@ -224,16 +336,30 @@ jobs:
           tar xzf "${{ inputs.dataset }}.tar.gz"
         shell: bash
 
+      - name: Set output paths
+        id: paths
+        run: |
+          if [ "${{ inputs.experiment }}" = "exp2b" ]; then
+            echo "output_dir=multi_react_exec_claude-haiku-4-5-20251001" >> "$GITHUB_OUTPUT"
+            echo "setting=multi_react_exec" >> "$GITHUB_OUTPUT"
+            echo "artifact_prefix=exp2b" >> "$GITHUB_OUTPUT"
+          else
+            echo "output_dir=single_claude-haiku-4-5-20251001" >> "$GITHUB_OUTPUT"
+            echo "setting=single" >> "$GITHUB_OUTPUT"
+            echo "artifact_prefix=exp2" >> "$GITHUB_OUTPUT"
+          fi
+        shell: bash
+
       - name: Download inference outputs
         uses: actions/download-artifact@v4
         with:
-          name: inference-outputs-trial${{ matrix.trial }}
-          path: data/${{ inputs.dataset }}/outputs/single_claude-haiku-4-5-20251001/
+          name: ${{ steps.paths.outputs.artifact_prefix }}-outputs-trial${{ matrix.trial }}
+          path: data/${{ inputs.dataset }}/outputs/${{ steps.paths.outputs.output_dir }}/
 
       - name: Recalculate output formulas (win32com)
         run: |
           python evaluation/open_spreadsheet.py `
-            --dir_path "data/${{ inputs.dataset }}/outputs/single_claude-haiku-4-5-20251001/" `
+            --dir_path "data/${{ inputs.dataset }}/outputs/${{ steps.paths.outputs.output_dir }}/" `
             --backend win32com
         shell: pwsh
         continue-on-error: true
@@ -252,7 +378,7 @@ jobs:
           cd evaluation
           python evaluation.py `
             --model claude-haiku-4-5-20251001 `
-            --setting single `
+            --setting "${{ steps.paths.outputs.setting }}" `
             --dataset "${{ inputs.dataset }}" `
             --num-test-cases 1
         shell: pwsh
@@ -261,10 +387,10 @@ jobs:
         run: |
           python3 -c "
           import json
-          results = json.load(open('outputs/eval_single_claude-haiku-4-5-20251001.json'))
+          results = json.load(open('outputs/eval_${{ steps.paths.outputs.setting }}_claude-haiku-4-5-20251001.json'))
           soft = [r['soft_restriction'] for r in results]
           hard = [r['hard_restriction'] for r in results]
-          print(f'Trial ${{ matrix.trial }} (Win32com):')
+          print(f'Trial ${{ matrix.trial }} (Win32com, ${{ inputs.experiment }}):')
           print(f'  Soft pass rate: {sum(soft)/len(soft)*100:.2f}%')
           print(f'  Hard pass rate: {sum(hard)/len(hard)*100:.2f}%')
           print(f'  Total tasks: {len(results)}')
@@ -274,10 +400,11 @@ jobs:
       - name: Upload evaluation results
         uses: actions/upload-artifact@v4
         with:
-          name: eval-win32com-trial${{ matrix.trial }}
-          path: outputs/eval_single_claude-haiku-4-5-20251001.json
+          name: eval-win32com-${{ inputs.experiment }}-trial${{ matrix.trial }}
+          path: outputs/eval_${{ steps.paths.outputs.setting }}_claude-haiku-4-5-20251001.json
           retention-days: 30
 
+  # ── Summary ────────────────────────────────────────────────────────────
   summary:
     name: Parity Summary
     needs: [eval-libreoffice, eval-win32com]
@@ -295,10 +422,10 @@ jobs:
           python3 << 'PYEOF'
           import json, glob, statistics
 
-          print("=== Parity Experiment Results ===\n")
+          print(f"=== Parity Experiment Results (${{ inputs.experiment }}) ===\n")
 
           for backend in ["libreoffice", "win32com"]:
-              files = sorted(glob.glob(f"results/eval-{backend}-trial*/eval_single_*.json"))
+              files = sorted(glob.glob(f"results/eval-{backend}-${{ inputs.experiment }}-trial*/eval_*.json"))
               if not files:
                   print(f"{backend}: No results found")
                   continue

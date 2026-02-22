@@ -53,34 +53,42 @@ def get_input_filename(task_id, dataset):
 def build_agent_instruction(data, input_filename, task_id):
     """Build the instruction prompt for the claude-code agent.
 
-    Mirrors the Harbor adapter's instruction.md template to ensure
-    Exp 3 and Exp 4 use equivalent instructions.
+    Uses the original SpreadsheetBench PROMPT_NO_DF_RCT_FORMAT 5-field structure
+    (without spreadsheet_content, since agents read files themselves) and
+    PROMPT_FORMAT_SINGLE's single-turn framing (no multi-turn interaction
+    instructions, since agents handle multi-turn naturally).
+
+    This ensures Exp 3 and Exp 4 use equivalent instructions that match
+    the original benchmark format.
     """
-    instruction = data['instruction']
-    answer_position = data['answer_position']
+    output_filename = f"1_{task_id}_output.xlsx"
 
-    return f"""You are given a spreadsheet file in the current directory. Your task is to write and execute Python code that manipulates the spreadsheet according to the instructions below.
+    return f"""You are a spreadsheet expert who can manipulate spreadsheets through Python code.
 
-## Instructions
+You need to solve the given spreadsheet manipulation question, which contains five types of information:
+- instruction: The question about spreadsheet manipulation.
+- spreadsheet_path: The path of the spreadsheet file you need to manipulate.
+- instruction_type: There are two values (Cell-Level Manipulation, Sheet-Level Manipulation) used to indicate whether the answer to this question applies only to specific cells or to the entire worksheet.
+- answer_position: The position need to be modified or filled. For Cell-Level Manipulation questions, this field is filled with the cell position; for Sheet-Level Manipulation, it is the maximum range of cells you need to modify. You only need to modify or fill in values within the cell range specified by answer_position.
+- output_path: You need to generate the modified spreadsheet file in this new path.
 
-{instruction}
+Below is the spreadsheet manipulation question you need to solve:
+### instruction
+{data['instruction']}
 
-## Input Files
+### spreadsheet_path
+{input_filename}
 
-The following input spreadsheet file is available in the current directory:
+### instruction_type
+{data['instruction_type']}
 
-- `{input_filename}`
+### answer_position
+{data['answer_position']}
 
-## Output Requirements
+### output_path
+{output_filename}
 
-Produce an output file named `1_{task_id}_output.xlsx` in the current directory.
-
-## Important Notes
-
-- Use Python with `openpyxl` or `pandas` to manipulate the spreadsheet file. Both libraries are available.
-- The answer should be written to the cell(s) at position: `{answer_position}`
-- Make sure to save the output file before finishing.
-- Write your code and execute it directly. Do not ask for confirmation.
+You should generate Python code for the final solution of the question.
 """
 
 

@@ -7,6 +7,7 @@ from tqdm import tqdm
 from llm_api import get_llm_response
 from code_exec import get_exec_client, extract_code, exec_code
 from prompt_format import PROMPT_FORMAT_SINGLE, PROMPT_DF_RCT_FORMAT , PROMPT_NO_DF_RCT_FORMAT
+from inference_single import BARE_NAMING_IDS, MISMATCHED_IDS, get_input_filename
 
 
 def gen_file_content(input_file):
@@ -24,7 +25,7 @@ def gen_file_content(input_file):
         final_str += f"Sheet Name: {sheet_name}\n"
         final_str += sheet_str + "\n"
         final_str += "-" * 50 + "\n"
-    
+
     return final_str
 
 
@@ -32,7 +33,7 @@ def gen_solution(opt):
     dataset_path = os.path.abspath(f'../data/{opt.dataset}')
     with open(f'{dataset_path}/dataset.json', 'r') as fp:
         dataset = json.load(fp)
-    
+
     # check if output file folder exists
     output_file_path = f'{dataset_path}/outputs'
     if not os.path.exists(output_file_path):
@@ -40,18 +41,22 @@ def gen_solution(opt):
         os.chmod(output_file_path, 0o777)
 
     # check if output file folder of the model exists
-    output_file_path = f'{output_file_path}/single_{opt.model}'
+    output_file_path = f'{output_file_path}/multi_{opt.setting}_{opt.model}'
     if not os.path.exists(output_file_path):
         os.makedirs(output_file_path)
         os.chmod(output_file_path, 0o777)
 
     # create code execution client
     client = get_exec_client(opt.code_exec_url, opt.conv_id)
-        
+
+    if opt.limit > 0:
+        dataset = dataset[:opt.limit]
+
     for data in tqdm(dataset):
-        file_name = f"1_{data['spreadsheet_path'].lstrip('spreadsheet/')}_input.xlsx"
+        task_id = data['spreadsheet_path'].lstrip('spreadsheet/')
+        file_name = get_input_filename(task_id, opt.dataset)
         input_path = f"/mnt/data/{data['spreadsheet_path']}/{file_name}"
-        output_path = f"/mnt/data/outputs/multi_{opt.setting}_{opt.model}/{file_name.rstrip(f'_input.xlsx')}_output.xlsx"
+        output_path = f"/mnt/data/outputs/multi_{opt.setting}_{opt.model}/1_{task_id}_output.xlsx"
         find_input_path = f"{dataset_path}/{data['spreadsheet_path']}/{file_name}"
 
         # three setting: row_exec, react_exec, row_react_exec
@@ -117,7 +122,7 @@ def run_solution(opt):
     with open(f'{dataset_path}/outputs/conv_multi_{opt.setting}_{opt.model}.jsonl', 'r') as fp:
         conv_records = [json.loads(line) for line in fp.readlines()]
     for conv in tqdm(conv_records):
-        for idx in range(2, 4):
+        for idx in range(2, opt.num_test_cases + 1):
             input_file = f"{idx}_{conv['id']}_input.xlsx"
             output_file = f"{idx}_{conv['id']}_output.xlsx"
             solution = conv['solution'].replace(f"1_{conv['id']}_input.xlsx", input_file)
@@ -137,7 +142,11 @@ def parse_option():
     parser.add_argument('--conv_id', type=str, default="EVAL", help='code execution conversation id')
     parser.add_argument('--max_turn_num', type=int, default=5, help='max turn number of conversation')
     parser.add_argument('--row', type=int, default=5, help='the number of rows provided in the prompt')
-    
+    parser.add_argument('--num-test-cases', type=int, default=3,
+                        help='number of test cases per task (3 for sample_data_200, 1 for verified_400)')
+    parser.add_argument('--limit', type=int, default=0,
+                        help='limit number of tasks to process (0 = all)')
+
     opt = parser.parse_args()
 
     return opt
@@ -148,4 +157,7 @@ if __name__ == '__main__':
     print(opt)
 
     gen_solution(opt)
-    run_solution(opt)
+    # Only run additional test cases if num_test_cases > 1
+    # verified_400 has only 1 test case, so run_solution is unnecessary
+    if opt.num_test_cases > 1:
+        run_solution(opt)
