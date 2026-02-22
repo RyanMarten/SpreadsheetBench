@@ -229,7 +229,7 @@ def parse_option():
 
 def evaluation(opt):
     dataset_path = os.path.abspath(f'../data/{opt.dataset}')
-    with open(f'{dataset_path}/dataset.json', 'r') as fp:
+    with open(f'{dataset_path}/dataset.json', 'r', encoding='utf-8') as fp:
         dataset = json.load(fp)
 
     eval_results = []
