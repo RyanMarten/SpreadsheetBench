@@ -21,16 +21,32 @@ on:
         type: string
 
 jobs:
+  setup:
+    name: Setup Matrix
+    runs-on: ubuntu-latest
+    outputs:
+      trials: ${{ steps.set-matrix.outputs.trials }}
+    steps:
+      - id: set-matrix
+        run: |
+          N=${{ inputs.num_trials || '3' }}
+          if [ "$N" = "1" ]; then
+            echo 'trials=[1]' >> "$GITHUB_OUTPUT"
+          elif [ "$N" = "2" ]; then
+            echo 'trials=[1,2]' >> "$GITHUB_OUTPUT"
+          else
+            echo 'trials=[1,2,3]' >> "$GITHUB_OUTPUT"
+          fi
+
   inference:
     name: "Inference (Trial ${{ matrix.trial }})"
+    needs: setup
     runs-on: ubuntu-latest
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
-        trial: [1, 2, 3]
-    # Skip trials beyond num_trials
-    if: ${{ matrix.trial <= fromJSON(inputs.num_trials || '3') }}
+        trial: ${{ fromJSON(needs.setup.outputs.trials) }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -42,8 +58,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: |
-          pip install tqdm pandas openpyxl openai numpy tornado docker requests
+        run: pip install tqdm pandas openpyxl openai numpy tornado docker requests
 
       - name: Extract dataset
         run: |
@@ -56,13 +71,11 @@ jobs:
       - name: Update config and start API server
         run: |
           cd code_exec_docker
-          # Point config at the dataset (absolute path for Docker volume mount)
           python3 -c "
-          import json
-          config = {'volumes_path': '$(pwd)/../data/${{ inputs.dataset }}'}
+          import json, os
+          config = {'volumes_path': os.path.abspath('../data/${{ inputs.dataset }}')}
           json.dump(config, open('config.json', 'w'))
           "
-          # Start the API server in the background
           python3 api.py --port 8081 &
           echo $! > /tmp/api_pid.txt
           sleep 5
@@ -86,18 +99,14 @@ jobs:
       - name: Stop API server
         if: always()
         run: |
-          if [ -f /tmp/api_pid.txt ]; then
-            kill $(cat /tmp/api_pid.txt) 2>/dev/null || true
-          fi
-          # Stop any remaining Docker containers
+          [ -f /tmp/api_pid.txt ] && kill $(cat /tmp/api_pid.txt) 2>/dev/null || true
           docker ps -q | xargs -r docker stop 2>/dev/null || true
 
       - name: Upload inference outputs
         uses: actions/upload-artifact@v4
         with:
           name: inference-outputs-trial${{ matrix.trial }}
-          path: |
-            data/${{ inputs.dataset }}/outputs/single_claude-haiku-4-5-20251001/
+          path: data/${{ inputs.dataset }}/outputs/single_claude-haiku-4-5-20251001/
           retention-days: 30
 
       - name: Upload conversation logs
@@ -109,14 +118,13 @@ jobs:
 
   eval-libreoffice:
     name: "LibreOffice Eval (Trial ${{ matrix.trial }})"
-    needs: inference
+    needs: [setup, inference]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        trial: [1, 2, 3]
-    if: ${{ matrix.trial <= fromJSON(inputs.num_trials || '3') }}
+        trial: ${{ fromJSON(needs.setup.outputs.trials) }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -185,14 +193,13 @@ jobs:
 
   eval-win32com:
     name: "Win32com Eval (Trial ${{ matrix.trial }})"
-    needs: inference
+    needs: [setup, inference]
     runs-on: windows-latest
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        trial: [1, 2, 3]
-    if: ${{ matrix.trial <= fromJSON(inputs.num_trials || '3') }}
+        trial: ${{ fromJSON(needs.setup.outputs.trials) }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -204,8 +211,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: |
-          pip install tqdm pandas openpyxl numpy pywin32
+        run: pip install tqdm pandas openpyxl numpy pywin32
 
       - name: Extract dataset
         run: |
@@ -225,7 +231,7 @@ jobs:
             --dir_path "data/${{ inputs.dataset }}/outputs/single_claude-haiku-4-5-20251001/" `
             --backend win32com
         shell: pwsh
-        continue-on-error: true  # Excel may not be available on GH Actions
+        continue-on-error: true
 
       - name: Recalculate answer formulas (win32com)
         run: |
@@ -278,12 +284,11 @@ jobs:
         with:
           pattern: eval-*
           path: results/
-          merge-multiple: false
 
       - name: Generate parity report
         run: |
           python3 << 'PYEOF'
-          import json, os, glob
+          import json, glob, statistics
 
           print("=== Parity Experiment Results ===\n")
 
@@ -298,12 +303,10 @@ jobs:
                   trial = f.split("trial")[1].split("/")[0]
                   results = json.load(open(f))
                   soft = [r["soft_restriction"] for r in results]
-                  hard = [r["hard_restriction"] for r in results]
                   pct = sum(soft) / len(soft) * 100
                   scores.append(pct)
                   print(f"  Trial {trial}: {pct:.2f}% (n={len(results)})")
               if len(scores) > 1:
-                  import statistics
-                  print(f"  Mean: {statistics.mean(scores):.2f}% ± {statistics.stdev(scores):.2f}%")
+                  print(f"  Mean: {statistics.mean(scores):.2f}% +/- {statistics.stdev(scores):.2f}%")
               print()
           PYEOF
