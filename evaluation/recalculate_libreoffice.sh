@@ -36,7 +36,17 @@ if [ "$COUNT" -eq 0 ]; then
     exit 0
 fi
 
-echo "Recalculating formulas in $COUNT file(s) using LibreOffice..."
+# Detect LibreOffice binary
+if command -v libreoffice &>/dev/null; then
+    SOFFICE="libreoffice"
+elif [ -x "/Applications/LibreOffice.app/Contents/MacOS/soffice" ]; then
+    SOFFICE="/Applications/LibreOffice.app/Contents/MacOS/soffice"
+else
+    echo "ERROR: LibreOffice not found. Install with: brew install --cask libreoffice (macOS) or apt install libreoffice-calc (Linux)"
+    exit 1
+fi
+
+echo "Recalculating formulas in $COUNT file(s) using LibreOffice ($SOFFICE)..."
 
 SUCCESS=0
 FAILED=0
@@ -45,7 +55,7 @@ for xlsx in $FILES; do
     basename=$(basename "$xlsx")
     tmpdir=$(mktemp -d)
 
-    if libreoffice --headless --calc --convert-to "xlsx:Calc MS Excel 2007 XML" --outdir "$tmpdir" "$xlsx" 2>/dev/null; then
+    if "$SOFFICE" --headless --calc --convert-to "xlsx:Calc MS Excel 2007 XML" --outdir "$tmpdir" "$xlsx" 2>/dev/null; then
         name="${basename%.xlsx}"
         if [ -f "$tmpdir/$name.xlsx" ]; then
             mv "$tmpdir/$name.xlsx" "$xlsx"
