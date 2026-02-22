@@ -65,6 +65,9 @@ def gen_solution(opt):
     # create code execution client
     client = get_exec_client(opt.code_exec_url, opt.conv_id)
 
+    if opt.limit > 0:
+        dataset = dataset[:opt.limit]
+
     for data in tqdm(dataset):
         try:
             task_id = data['spreadsheet_path'].lstrip('spreadsheet/')
@@ -142,6 +145,8 @@ def parse_option():
     parser.add_argument('--row', type=int, default=5, help='the number of rows provided in the prompt')
     parser.add_argument('--num-test-cases', type=int, default=3,
                         help='number of test cases per task (3 for sample_data_200, 1 for verified_400)')
+    parser.add_argument('--limit', type=int, default=0,
+                        help='limit number of tasks to process (0 = all)')
     opt = parser.parse_args()
 
     return opt
