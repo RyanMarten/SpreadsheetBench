@@ -242,8 +242,8 @@ class JupyterKernel:
 class JupyterGatewayDocker:
     DOCKER_IMAGE = "docker.io/xingyaoww/codeact-executor"
     RESOURCE_CONSTRAINTS = {
-        'mem_limit': '2g', # Limit to 2 GB of memory (tasks use ~200-500MB)
-        'nano_cpus': 2 * 10 ** 9  # Limit to 2 CPU cores
+        'mem_limit': '512m', # Limit to 512 MB of memory (tasks use ~200-500MB)
+        'nano_cpus': 1 * 10 ** 9  # Limit to 1 CPU core
         # Add other constraints as needed
     }
 

@@ -28,7 +28,7 @@ on:
       n_concurrent:
         description: 'Number of tasks to process concurrently (exp2b only)'
         required: false
-        default: '10'
+        default: '3'
         type: string
 
 jobs:
@@ -174,7 +174,7 @@ jobs:
           config = {'volumes_path': os.path.abspath('../data/${{ inputs.dataset }}')}
           json.dump(config, open('config.json', 'w'))
           "
-          python3 api.py --port 8081 &
+          KERNEL_TIMEOUT=120 CLEANUP_TIMEOUT_MS=30000 python3 api.py --port 8081 &
           echo $! > /tmp/api_pid.txt
           sleep 5
           echo "API server started (PID: $(cat /tmp/api_pid.txt))"
@@ -199,7 +199,7 @@ jobs:
             --conv_id "trial${{ matrix.trial }}" \
             --code_exec_url "http://localhost:8081/execute" \
             --max_turn_num 5 \
-            --n-concurrent ${{ inputs.n_concurrent || '10' }} \
+            --n-concurrent ${{ inputs.n_concurrent || '3' }} \
             $LIMIT_ARG
 
       - name: Stop API server

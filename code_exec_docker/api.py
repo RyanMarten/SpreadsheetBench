@@ -28,7 +28,7 @@ JupyterKernelType = namedtuple("JupyterKernelType", [
 
 def cleanup_kernels(app, force=False):
     """Cleanup kernels and gateway dockers that have timed out."""
-    KERNEL_TIMEOUT = 10 * 60  # 10 minutes
+    KERNEL_TIMEOUT = int(os.environ.get("KERNEL_TIMEOUT", 10 * 60))  # seconds
     current_time = time.time()
     to_delete = []
     conv_id_to_kernel = app.conv_id_to_kernel
