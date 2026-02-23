@@ -25,6 +25,11 @@ on:
         required: false
         default: '0'
         type: string
+      n_concurrent:
+        description: 'Number of tasks to process concurrently (exp2b only)'
+        required: false
+        default: '10'
+        type: string
 
 jobs:
   setup:
@@ -194,6 +199,7 @@ jobs:
             --conv_id "trial${{ matrix.trial }}" \
             --code_exec_url "http://localhost:8081/execute" \
             --max_turn_num 5 \
+            --n-concurrent ${{ inputs.n_concurrent || '10' }} \
             $LIMIT_ARG
 
       - name: Stop API server

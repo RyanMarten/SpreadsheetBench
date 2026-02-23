@@ -1,3 +1,5 @@
+import re
+
 from jupyter_kernel_cli import ClientJupyterKernel
 
 def get_exec_client(url, conv_id):
@@ -5,12 +7,17 @@ def get_exec_client(url, conv_id):
     return client
 
 def extract_code(response):
-    if response.find('```python') != -1:
+    # 1. Try markdown code blocks (original behavior)
+    if '```python' in response:
         code = response[response.find('```python') + len('```python'):]
         code = code[:code.find('```')].lstrip('\n').rstrip('\n')
-    else:
-        code = response
-    return code
+        return code
+    # 2. Try XML function_calls format (Anthropic models via OpenAI-compat API)
+    match = re.search(r'<parameter\s+name="code">\s*(.*?)\s*</parameter>', response, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    # 3. Fallback: treat entire response as code
+    return response
 
 def exec_code(client, code):
     res = client.execute(code)
